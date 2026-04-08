@@ -5,3 +5,4 @@ pythonenv*
 venv
 .venv
 _new_package_repo/
+.DS_Store
