@@ -13,16 +13,19 @@ from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
 
+try:
+    from py_nissan_leaf_obd_ble import NissanLeafObdBleApiClient
+except ImportError:  # pragma: no cover - optional dependency at runtime
+    NissanLeafObdBleApiClient = None
+
 from .const import (
     CONF_CHARACTERISTIC_UUID_READ,
     CONF_CHARACTERISTIC_UUID_WRITE,
     CONF_QUERY_DTCS,
-    CONF_SERVICE_UUID,
     CONF_VEHICLE_PROFILE_ID,
     DATA_SENSOR_META,
     DEFAULT_CHARACTERISTIC_UUID_READ,
     DEFAULT_CHARACTERISTIC_UUID_WRITE,
-    DEFAULT_SERVICE_UUID,
 )
 from .profiles import get_profile_by_id
 
@@ -153,6 +156,10 @@ class GenericObdBleApiClient:
 
     async def async_get_data(self, options: dict) -> dict[str, object]:
         """Fetch standard and profile-enhanced OBD-II values."""
+        profile = get_profile_by_id(options.get(CONF_VEHICLE_PROFILE_ID))
+        if profile and profile.get("backend") == "nissan_leaf_api":
+            return await self._async_get_nissan_leaf_data(options, profile)
+
         read_uuid = options.get(
             CONF_CHARACTERISTIC_UUID_READ,
             DEFAULT_CHARACTERISTIC_UUID_READ,
@@ -168,7 +175,6 @@ class GenericObdBleApiClient:
             DATA_SENSOR_META: {},
         }
 
-        profile = get_profile_by_id(options.get(CONF_VEHICLE_PROFILE_ID))
         if profile:
             response["vehicle_profile"] = profile["display_name"]
 
@@ -241,6 +247,39 @@ class GenericObdBleApiClient:
 
         return response
 
+    async def _async_get_nissan_leaf_data(
+        self,
+        options: dict,
+        profile: dict[str, Any],
+    ) -> dict[str, object]:
+        """Fetch Nissan Leaf data via the dedicated Leaf library."""
+        response: dict[str, object] = {
+            "adapter_name": self._ble_device.name or "ELM327",
+            "adapter_address": self._ble_device.address,
+            "vehicle_profile": profile["display_name"],
+            DATA_SENSOR_META: dict(profile.get("sensor_meta", {})),
+        }
+
+        if NissanLeafObdBleApiClient is None:
+            response["leaf_backend_status"] = "py-nissan-leaf-obd-ble is not installed"
+            return response
+
+        try:
+            leaf_client = NissanLeafObdBleApiClient(self._ble_device)
+            leaf_data = await leaf_client.async_get_data(options)
+        except Exception as err:  # pragma: no cover - depends on runtime BLE state
+            _LOGGER.debug("Nissan Leaf backend polling failed: %s", err)
+            response["leaf_backend_status"] = f"Leaf backend error: {err}"
+            return response
+
+        if not leaf_data:
+            response["leaf_backend_status"] = "Leaf backend returned no data"
+            return response
+
+        response.update(leaf_data)
+        response["leaf_backend_status"] = "Leaf backend active"
+        return response
+
     async def async_probe_profile(self, options: dict) -> dict[str, object]:
         """Probe the selected vehicle profile and summarize supported enhanced PIDs."""
         profile = get_profile_by_id(options.get(CONF_VEHICLE_PROFILE_ID))
@@ -249,6 +288,27 @@ class GenericObdBleApiClient:
                 "profile_probe_status": "No vehicle profile selected",
                 "profile_probe_supported_count": 0,
                 "profile_probe_supported_entities": "none",
+                "profile_probe_unsupported_entities": "none",
+            }
+
+        if profile.get("backend") == "nissan_leaf_api":
+            leaf_data = await self._async_get_nissan_leaf_data(options, profile)
+            discovered = [
+                key
+                for key in leaf_data.keys()
+                if key
+                not in {
+                    "adapter_name",
+                    "adapter_address",
+                    "vehicle_profile",
+                    "leaf_backend_status",
+                    DATA_SENSOR_META,
+                }
+            ]
+            return {
+                "profile_probe_status": f"Leaf profile probe complete: {len(discovered)} keys",
+                "profile_probe_supported_count": len(discovered),
+                "profile_probe_supported_entities": ", ".join(sorted(discovered)) if discovered else "none",
                 "profile_probe_unsupported_entities": "none",
             }
 

@@ -173,7 +173,11 @@ async def async_setup_entry(
         if key in SENSOR_TYPES or key in RESERVED_DATA_KEYS:
             continue
 
-        descriptor = _description_from_meta(key, profile_meta.get(key))
+        key_meta = profile_meta.get(key)
+        if key_meta and key_meta.get("entity_platform") == "binary_sensor":
+            continue
+
+        descriptor = _description_from_meta(key, key_meta)
         entities.append(
             GenericObdBleSensor(
                 coordinator,

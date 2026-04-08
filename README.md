@@ -44,6 +44,9 @@ If a matching profile exists, the integration will query profile-specific enhanc
 
 Current built-in profile:
 
+- Nissan Leaf (all years)
+	- Uses the `py-nissan-leaf-obd-ble` backend for Leaf-specific data
+	- Includes Leaf-specific binary entities such as `ac_on`, `eco_mode`, and `e_pedal_mode`
 - Toyota Highlander (2017) - Experimental
 	- [ECM] Odometer var.1
 
