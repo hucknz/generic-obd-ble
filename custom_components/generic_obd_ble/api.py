@@ -153,7 +153,6 @@ class GenericObdBleApiClient:
 
     async def async_get_data(self, options: dict) -> dict[str, object]:
         """Fetch standard and profile-enhanced OBD-II values."""
-        service_uuid = options.get(CONF_SERVICE_UUID, DEFAULT_SERVICE_UUID)
         read_uuid = options.get(
             CONF_CHARACTERISTIC_UUID_READ,
             DEFAULT_CHARACTERISTIC_UUID_READ,
@@ -181,14 +180,6 @@ class GenericObdBleApiClient:
                 self._ble_device.address,
                 max_attempts=2,
             )
-
-            services = await client.get_services()
-            if not any(svc.uuid.lower() == service_uuid.lower() for svc in services):
-                _LOGGER.debug(
-                    "Configured service UUID %s not advertised by adapter %s",
-                    service_uuid,
-                    self._ble_device.address,
-                )
 
             await self._initialize_adapter(client, read_uuid, write_uuid)
 
