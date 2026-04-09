@@ -18,7 +18,7 @@ async def async_setup_entry(
 
     entities = [GenericObdBleRefreshButton(coordinator, entry)]
     profile = get_profile_by_id(entry.data.get(CONF_VEHICLE_PROFILE_ID))
-    if profile:
+    if profile and profile.get("enhanced_pids"):
         entities.append(GenericObdBleProfileProbeButton(coordinator, entry, profile))
 
     async_add_entities(entities)
