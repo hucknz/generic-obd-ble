@@ -6,8 +6,10 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
+from homeassistant.const import STATE_ON
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_VEHICLE_PROFILE_ID, DATA_SENSOR_META, DOMAIN, NAME
 from .entity import GenericObdBleEntity
@@ -64,7 +66,11 @@ async def async_setup_entry(
     async_add_devices(entities)
 
 
-class GenericObdBleBinarySensor(GenericObdBleEntity, BinarySensorEntity):
+class GenericObdBleBinarySensor(
+    GenericObdBleEntity,
+    BinarySensorEntity,
+    RestoreEntity,
+):
     """generic_obd_ble binary_sensor class."""
 
     def __init__(
@@ -78,13 +84,25 @@ class GenericObdBleBinarySensor(GenericObdBleEntity, BinarySensorEntity):
         super().__init__(coordinator, config_entry)
         self._sensor = sensor_key
         self._description = description
+        self._restored_is_on: bool | None = None
         self._attr_name = f"{NAME} {description.name}"
         self._attr_device_class = description.device_class
+
+    async def async_added_to_hass(self) -> None:
+        """Restore last known state on startup until fresh data arrives."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if not last_state:
+            return
+        self._restored_is_on = last_state.state == STATE_ON
 
     @property
     def is_on(self):
         """Return true if the binary_sensor is on."""
-        return self.coordinator.data.get(self._sensor)
+        live_value = self.coordinator.data.get(self._sensor)
+        if live_value is not None:
+            return bool(live_value)
+        return self._restored_is_on
 
     @property
     def icon(self):

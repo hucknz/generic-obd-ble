@@ -134,6 +134,29 @@ def _decode_profile_value(payload: list[int], decoder_cfg: dict[str, Any]) -> fl
     return None
 
 
+def _normalize_leaf_soc(value: object, profile_id: str | None) -> float | None:
+    """Normalize Leaf SoC values for profiles known to need scaling."""
+    if not isinstance(value, (int, float)):
+        return None
+
+    soc = float(value)
+
+    # ZE1 generally reports a direct percentage already.
+    if profile_id != "nissan_leaf_ze0":
+        return soc if 0 <= soc <= 100 else None
+
+    if 0 <= soc <= 100:
+        return soc
+
+    # ZE0 can report SoC in a 0..409.6 style range.
+    if soc > 100:
+        normalized = soc / 4.096
+        if 0 <= normalized <= 100:
+            return normalized
+
+    return None
+
+
 PID_DEFINITIONS: tuple[ObdPid, ...] = (
     ObdPid("engine_coolant_temp", "05", _decode_temp),
     ObdPid("engine_rpm", "0C", _decode_rpm),
@@ -275,6 +298,21 @@ class GenericObdBleApiClient:
         if not leaf_data:
             response["leaf_backend_status"] = "Leaf backend returned no data"
             return response
+
+        normalized_soc = _normalize_leaf_soc(
+            leaf_data.get("state_of_charge"),
+            profile.get("id"),
+        )
+        if normalized_soc is not None:
+            original_soc = leaf_data.get("state_of_charge")
+            if original_soc != normalized_soc:
+                _LOGGER.debug(
+                    "Normalized Leaf SoC from %s to %.3f for profile %s",
+                    original_soc,
+                    normalized_soc,
+                    profile.get("id", "unknown"),
+                )
+                leaf_data["state_of_charge"] = round(normalized_soc, 3)
 
         response.update(leaf_data)
         response["leaf_backend_status"] = "Leaf backend active"

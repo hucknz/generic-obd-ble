@@ -8,8 +8,10 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
     CONF_VEHICLE_PROFILE_ID,
@@ -233,7 +235,7 @@ def _description_from_meta(
     )
 
 
-class GenericObdBleSensor(GenericObdBleEntity, SensorEntity):
+class GenericObdBleSensor(GenericObdBleEntity, SensorEntity, RestoreEntity):
     """Config entry for generic_obd_ble sensors."""
 
     def __init__(
@@ -247,17 +249,52 @@ class GenericObdBleSensor(GenericObdBleEntity, SensorEntity):
         super().__init__(coordinator, config_entry)
         self._sensor = sensor_key
         self._description = description
+        self._restored_native_value: Any | None = None
         self._attr_name = f"{NAME} {description.name}"
         self._attr_device_class = description.device_class
         self._attr_native_unit_of_measurement = description.native_unit_of_measurement
         self._attr_state_class = description.state_class
 
+    async def async_added_to_hass(self) -> None:
+        """Restore last known state on startup until fresh data arrives."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if not last_state:
+            return
+
+        if last_state.state in {STATE_UNKNOWN, STATE_UNAVAILABLE}:
+            return
+
+        self._restored_native_value = _coerce_restored_value(last_state.state)
+
     @property
     def native_value(self):
         """Return the state of the sensor."""
-        return self.coordinator.data.get(self._sensor)
+        live_value = self.coordinator.data.get(self._sensor)
+        if live_value is not None:
+            return live_value
+        return self._restored_native_value
 
     @property
     def icon(self):
         """Return the icon of the sensor."""
         return self._description.icon
+
+
+def _coerce_restored_value(state: str) -> Any:
+    """Best-effort coercion for restored sensor state values."""
+    lowered = state.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+
+    try:
+        as_int = int(state)
+        if str(as_int) == state:
+            return as_int
+    except ValueError:
+        pass
+
+    try:
+        return float(state)
+    except ValueError:
+        return state
