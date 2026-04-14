@@ -89,6 +89,19 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "year": "2010-2017",
         "backend": "nissan_leaf_api",
         "inherit_base_profile": False,
+        "enhanced_pids": [
+            {
+                "key": "odometer",
+                "name": "Odometer",
+                "mode": "22",
+                "pid": "F186",
+                "decoder": {"type": "uint32", "scale": 0.1, "offset": 0.0},
+                "unit": "km",
+                "device_class": "distance",
+                "state_class": "total_increasing",
+                "icon": "mdi:counter",
+            }
+        ],
         "sensor_meta": {
             "gear_position": {"name": "Gear position", "icon": "mdi:car-shift-pattern"},
             "bat_12v_voltage": {
@@ -194,6 +207,19 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "year": "2018-2024",
         "backend": "nissan_leaf_api",
         "inherit_base_profile": False,
+        "enhanced_pids": [
+            {
+                "key": "odometer",
+                "name": "Odometer",
+                "mode": "22",
+                "pid": "F186",
+                "decoder": {"type": "uint32", "scale": 0.1, "offset": 0.0},
+                "unit": "km",
+                "device_class": "distance",
+                "state_class": "total_increasing",
+                "icon": "mdi:counter",
+            }
+        ],
         "sensor_meta": {
             "gear_position": {"name": "Gear position", "icon": "mdi:car-shift-pattern"},
             "bat_12v_voltage": {

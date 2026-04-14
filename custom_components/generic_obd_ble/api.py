@@ -319,6 +319,42 @@ class GenericObdBleApiClient:
                 leaf_data["state_of_charge"] = round(normalized_soc, 3)
 
         response.update(leaf_data)
+        
+        # Query any enhanced PIDs defined in the profile
+        if profile.get("enhanced_pids"):
+            read_uuid = options.get(
+                CONF_CHARACTERISTIC_UUID_READ,
+                DEFAULT_CHARACTERISTIC_UUID_READ,
+            )
+            write_uuid = options.get(
+                CONF_CHARACTERISTIC_UUID_WRITE,
+                DEFAULT_CHARACTERISTIC_UUID_WRITE,
+            )
+            
+            client: BleakClient | None = None
+            try:
+                client = await establish_connection(
+                    BleakClient,
+                    self._ble_device,
+                    self._ble_device.address,
+                    max_attempts=2,
+                )
+                await self._initialize_adapter(client, read_uuid, write_uuid)
+                
+                await self._query_profile_pids(
+                    client,
+                    read_uuid,
+                    write_uuid,
+                    profile,
+                    response,
+                )
+            except (BleakError, TimeoutError, ValueError) as err:
+                _LOGGER.debug("Failed to query Leaf enhanced PIDs: %s", err)
+            finally:
+                if client:
+                    with contextlib.suppress(BleakError):
+                        await client.disconnect()
+        
         response["leaf_backend_status"] = "Leaf backend active"
         return response
 
@@ -423,6 +459,12 @@ class GenericObdBleApiClient:
         response: dict[str, object],
     ) -> None:
         """Query profile-enhanced PIDs for the selected vehicle profile."""
+        # Get reference to sensor metadata dict, ensuring it's a proper dict
+        sensor_meta = response.get(DATA_SENSOR_META)
+        if not isinstance(sensor_meta, dict):
+            sensor_meta = {}
+            response[DATA_SENSOR_META] = sensor_meta
+            
         for profile_pid in profile.get("enhanced_pids", []):
             header = profile_pid.get("header")
             if header:
@@ -448,7 +490,7 @@ class GenericObdBleApiClient:
 
             key = profile_pid["key"]
             response[key] = decoded_value
-            response[DATA_SENSOR_META][key] = {
+            sensor_meta[key] = {
                 "name": profile_pid.get("name", key.replace("_", " ").title()),
                 "unit": profile_pid.get("unit"),
                 "device_class": profile_pid.get("device_class"),
