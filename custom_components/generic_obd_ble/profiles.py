@@ -4,6 +4,82 @@ from __future__ import annotations
 
 from typing import Any
 
+# Base profile with standard OBD-II sensors available on most vehicles
+BASE_PROFILE: dict[str, Any] = {
+    "id": "base",
+    "display_name": "Base OBD-II Profile",
+    "description": "Standard OBD-II sensors available on most vehicles",
+    "sensor_meta": {
+        "engine_coolant_temp": {
+            "name": "Engine coolant temperature",
+            "unit": "°C",
+            "device_class": "temperature",
+            "state_class": "measurement",
+            "icon": "mdi:thermometer",
+        },
+        "engine_rpm": {
+            "name": "Engine RPM",
+            "unit": "rpm",
+            "state_class": "measurement",
+            "icon": "mdi:gauge",
+        },
+        "vehicle_speed": {
+            "name": "Vehicle speed",
+            "unit": "km/h",
+            "device_class": "speed",
+            "state_class": "measurement",
+            "icon": "mdi:speedometer",
+        },
+        "intake_air_temp": {
+            "name": "Intake air temperature",
+            "unit": "°C",
+            "device_class": "temperature",
+            "state_class": "measurement",
+            "icon": "mdi:thermometer",
+        },
+        "maf": {
+            "name": "Mass air flow",
+            "unit": "g/s",
+            "state_class": "measurement",
+            "icon": "mdi:gauge",
+        },
+        "throttle_position": {
+            "name": "Throttle position",
+            "unit": "%",
+            "state_class": "measurement",
+            "icon": "mdi:percent",
+        },
+        "engine_runtime": {
+            "name": "Engine runtime",
+            "unit": "s",
+            "device_class": "duration",
+            "state_class": "total_increasing",
+            "icon": "mdi:clock",
+        },
+        "fuel_level": {
+            "name": "Fuel level",
+            "unit": "%",
+            "device_class": "battery",
+            "state_class": "measurement",
+            "icon": "mdi:fuel",
+        },
+        "ambient_air_temp": {
+            "name": "Ambient air temperature",
+            "unit": "°C",
+            "device_class": "temperature",
+            "state_class": "measurement",
+            "icon": "mdi:thermometer",
+        },
+        "control_module_voltage": {
+            "name": "Control module voltage",
+            "unit": "V",
+            "device_class": "voltage",
+            "state_class": "measurement",
+            "icon": "mdi:car-battery",
+        },
+    },
+}
+
 PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
     {
         "id": "nissan_leaf_ze0",
@@ -12,6 +88,7 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "model": "Leaf",
         "year": "2010-2017",
         "backend": "nissan_leaf_api",
+        "inherit_base_profile": False,
         "sensor_meta": {
             "gear_position": {"name": "Gear position", "icon": "mdi:car-shift-pattern"},
             "bat_12v_voltage": {
@@ -116,6 +193,7 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "model": "Leaf",
         "year": "2018-2024",
         "backend": "nissan_leaf_api",
+        "inherit_base_profile": False,
         "sensor_meta": {
             "gear_position": {"name": "Gear position", "icon": "mdi:car-shift-pattern"},
             "bat_12v_voltage": {
@@ -188,14 +266,15 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
     },
     {
         "id": "toyota_highlander_2017",
-        "display_name": "Toyota Highlander (2017) - Experimental",
+        "display_name": "Toyota Highlander (2017)",
         "make": "Toyota",
         "model": "Highlander",
         "year": "2017",
+        "inherit_base_profile": True,
         "enhanced_pids": [
             {
-                "key": "odometer_ecm_var_1",
-                "name": "[ECM] Odometer var.1",
+                "key": "odometer_ecm",
+                "name": "Odometer (ECM)",
                 "mode": "22",
                 "pid": "01A6",
                 "header": "7E0",
@@ -243,6 +322,31 @@ def get_profile_by_id(profile_id: str | None) -> dict[str, Any] | None:
         if profile["id"] == profile_id:
             return profile
     return None
+
+
+def get_merged_profile(profile_id: str | None) -> dict[str, Any] | None:
+    """Return a profile with base profile merged in (if applicable).
+    
+    If the profile has inherit_base_profile=True, merges base profile data.
+    Otherwise returns the profile as-is.
+    """
+    profile = get_profile_by_id(profile_id)
+    if not profile:
+        return None
+
+    # Don't merge base profile for special backends or if explicitly disabled
+    if profile.get("backend") or not profile.get("inherit_base_profile", True):
+        return profile
+
+    # Create a merged profile: base + vehicle-specific
+    merged = {**profile}
+    
+    # Merge sensor metadata: base first, then vehicle-specific (vehicle overrides base)
+    base_sensor_meta = BASE_PROFILE.get("sensor_meta", {})
+    vehicle_sensor_meta = profile.get("sensor_meta", {})
+    merged["sensor_meta"] = {**base_sensor_meta, **vehicle_sensor_meta}
+    
+    return merged
 
 
 def find_profile_id(make: str, model: str, year: str) -> str | None:

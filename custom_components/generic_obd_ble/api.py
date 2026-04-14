@@ -27,7 +27,7 @@ from .const import (
     DEFAULT_CHARACTERISTIC_UUID_READ,
     DEFAULT_CHARACTERISTIC_UUID_WRITE,
 )
-from .profiles import get_profile_by_id
+from .profiles import get_profile_by_id, get_merged_profile
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -200,6 +200,10 @@ class GenericObdBleApiClient:
 
         if profile:
             response["vehicle_profile"] = profile["display_name"]
+            # Use merged profile to get base + vehicle-specific sensor metadata
+            merged_profile = get_merged_profile(options.get(CONF_VEHICLE_PROFILE_ID))
+            if merged_profile:
+                response[DATA_SENSOR_META] = dict(merged_profile.get("sensor_meta", {}))
 
         client: BleakClient | None = None
         try:
@@ -379,6 +383,17 @@ class GenericObdBleApiClient:
             )
             supported = probe_result["supported"]
             unsupported = probe_result["unsupported"]
+            
+            # Add base profile sensor metadata to the list of supported if profile inherits from base
+            merged_profile = get_merged_profile(options.get(CONF_VEHICLE_PROFILE_ID))
+            if merged_profile and merged_profile.get("inherit_base_profile", True):
+                base_sensors = list(merged_profile.get("sensor_meta", {}).keys())
+                # These are standard OBD-II sensors that should be listed as "supported by base profile"
+                for sensor_key in base_sensors:
+                    if sensor_key not in supported and sensor_key not in [pid.key for pid in PID_DEFINITIONS]:
+                        # Mark as supported from base profile
+                        supported.insert(0, f"[base] {sensor_key}")
+                        
         except (BleakError, TimeoutError, ValueError) as err:
             _LOGGER.debug("Profile probe failed: %s", err)
             return {
