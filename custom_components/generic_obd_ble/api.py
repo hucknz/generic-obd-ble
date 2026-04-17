@@ -157,6 +157,34 @@ def _normalize_leaf_soc(value: object, profile_id: str | None) -> float | None:
     return None
 
 
+def _extract_leaf_odometer(leaf_data: dict[str, object]) -> float | None:
+    """Extract odometer from Leaf backend keys and normalize to kilometers."""
+    km_candidates = (
+        "odometer",
+        "odometer_km",
+        "odometer_kilometers",
+        "odo",
+        "odo_km",
+        "distance_total_km",
+    )
+    for key in km_candidates:
+        value = leaf_data.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+
+    miles_candidates = (
+        "odometer_miles",
+        "odo_miles",
+        "distance_total_miles",
+    )
+    for key in miles_candidates:
+        value = leaf_data.get(key)
+        if isinstance(value, (int, float)):
+            return float(value) * 1.609344
+
+    return None
+
+
 PID_DEFINITIONS: tuple[ObdPid, ...] = (
     ObdPid("engine_coolant_temp", "05", _decode_temp),
     ObdPid("engine_rpm", "0C", _decode_rpm),
@@ -319,42 +347,11 @@ class GenericObdBleApiClient:
                 leaf_data["state_of_charge"] = round(normalized_soc, 3)
 
         response.update(leaf_data)
-        
-        # Query any enhanced PIDs defined in the profile
-        if profile.get("enhanced_pids"):
-            read_uuid = options.get(
-                CONF_CHARACTERISTIC_UUID_READ,
-                DEFAULT_CHARACTERISTIC_UUID_READ,
-            )
-            write_uuid = options.get(
-                CONF_CHARACTERISTIC_UUID_WRITE,
-                DEFAULT_CHARACTERISTIC_UUID_WRITE,
-            )
-            
-            client: BleakClient | None = None
-            try:
-                client = await establish_connection(
-                    BleakClient,
-                    self._ble_device,
-                    self._ble_device.address,
-                    max_attempts=2,
-                )
-                await self._initialize_adapter(client, read_uuid, write_uuid)
-                
-                await self._query_profile_pids(
-                    client,
-                    read_uuid,
-                    write_uuid,
-                    profile,
-                    response,
-                )
-            except (BleakError, TimeoutError, ValueError) as err:
-                _LOGGER.debug("Failed to query Leaf enhanced PIDs: %s", err)
-            finally:
-                if client:
-                    with contextlib.suppress(BleakError):
-                        await client.disconnect()
-        
+
+        odometer = _extract_leaf_odometer(leaf_data)
+        if odometer is not None and odometer >= 0:
+            response["odometer"] = round(odometer, 3)
+
         response["leaf_backend_status"] = "Leaf backend active"
         return response
 

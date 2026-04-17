@@ -102,7 +102,14 @@ class GenericObdBleDataUpdateCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Unable to fetch data: {err}") from err
         else:
             if self.options.get("cache_values", False):
-                self._cache_data.update(new_data)
+                # Keep previous values when new payload reports None.
+                # This avoids flipping entities to unavailable on transient reads.
+                filtered = {
+                    key: value
+                    for key, value in new_data.items()
+                    if value is not None
+                }
+                self._cache_data.update(filtered)
                 return self._cache_data
             return new_data
 

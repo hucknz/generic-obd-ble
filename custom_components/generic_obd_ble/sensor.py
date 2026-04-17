@@ -159,6 +159,7 @@ async def async_setup_entry(
     profile = get_profile_by_id(entry.data.get(CONF_VEHICLE_PROFILE_ID))
 
     entities: list[GenericObdBleSensor] = []
+    created_sensor_keys: set[str] = set()
 
     for sensor_key, descriptor in SENSOR_TYPES.items():
         if sensor_key in keys:
@@ -170,6 +171,7 @@ async def async_setup_entry(
                     description=descriptor,
                 )
             )
+            created_sensor_keys.add(sensor_key)
 
     for key in keys:
         if key in SENSOR_TYPES or key in RESERVED_DATA_KEYS:
@@ -188,6 +190,28 @@ async def async_setup_entry(
                 description=descriptor,
             )
         )
+        created_sensor_keys.add(key)
+
+    # If a profile declares sensor metadata, add those sensors even when
+    # current payload is sparse (for example after a transient backend read failure).
+    for key, key_meta in profile_meta.items():
+        if key in created_sensor_keys:
+            continue
+        if key in RESERVED_DATA_KEYS:
+            continue
+        if key_meta and key_meta.get("entity_platform") == "binary_sensor":
+            continue
+
+        descriptor = _description_from_meta(key, key_meta)
+        entities.append(
+            GenericObdBleSensor(
+                coordinator,
+                entry,
+                sensor_key=key,
+                description=descriptor,
+            )
+        )
+        created_sensor_keys.add(key)
 
     if profile:
         for diagnostic_key in PROFILE_DIAGNOSTIC_KEYS:
