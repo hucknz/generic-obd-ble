@@ -131,6 +131,12 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "state_class": "measurement",
                 "icon": "mdi:battery-heart",
             },
+            "hv_battery_hx": {
+                "name": "HV battery Hx",
+                "unit": "%",
+                "state_class": "measurement",
+                "icon": "mdi:battery-heart-variant",
+            },
             "hv_battery_Ah": {
                 "name": "HV battery capacity",
                 "unit": "Ah",
@@ -248,6 +254,12 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "unit": "%",
                 "state_class": "measurement",
                 "icon": "mdi:battery-heart",
+            },
+            "hv_battery_hx": {
+                "name": "HV battery Hx",
+                "unit": "%",
+                "state_class": "measurement",
+                "icon": "mdi:battery-heart-variant",
             },
             "odometer": {
                 "name": "Odometer",

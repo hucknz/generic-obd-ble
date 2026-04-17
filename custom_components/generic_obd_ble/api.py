@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from time import monotonic
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -178,6 +179,99 @@ def _extract_leaf_soc(leaf_data: dict[str, object], profile_id: str | None) -> f
     return None
 
 
+def _normalize_leaf_ahr(value: object) -> float | None:
+    """Normalize Leaf Ah reading to a plausible range."""
+    if not isinstance(value, (int, float)):
+        return None
+
+    ahr = float(value)
+    if 20 <= ahr <= 140:
+        return ahr
+
+    divisors = (25.6, 21.64, 10.0, 100.0, 1024.0)
+    candidates = [ahr / divisor for divisor in divisors if 20 <= (ahr / divisor) <= 140]
+    if not candidates:
+        return None
+
+    # Prefer lower plausible value when multiple scales fit.
+    return min(candidates)
+
+
+def _extract_leaf_ahr(leaf_data: dict[str, object]) -> float | None:
+    """Extract and normalize Leaf Ah from known backend field aliases."""
+    candidates = (
+        "hv_battery_Ah",
+        "hv_battery_ah",
+        "battery_ahr",
+        "ahr",
+    )
+    for key in candidates:
+        normalized = _normalize_leaf_ahr(leaf_data.get(key))
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def _derive_leaf_soh_from_ahr(ahr: float | None, profile_id: str | None) -> float | None:
+    """Estimate SOH% from Ah using nominal pack Ah by profile generation."""
+    if ahr is None or ahr <= 0:
+        return None
+
+    nominal_ahr = 79.2 if profile_id == "nissan_leaf_ze0" else 115.0
+    soh = (ahr / nominal_ahr) * 100.0
+    if 0 <= soh <= 100:
+        return soh
+    return None
+
+
+def _normalize_leaf_percent(value: object) -> float | None:
+    """Normalize a percentage-like value to 0..100."""
+    if not isinstance(value, (int, float)):
+        return None
+
+    v = float(value)
+    if 0 <= v <= 100:
+        return v
+
+    divisors = (1024.0, 100.0, 21.64, 10.0)
+    candidates = [v / divisor for divisor in divisors if 0 <= (v / divisor) <= 100]
+    if not candidates:
+        return None
+    return max(candidates)
+
+
+def _extract_leaf_soh(leaf_data: dict[str, object], profile_id: str | None) -> float | None:
+    """Extract and normalize Leaf SOH from known backend aliases."""
+    soh_candidates = (
+        "hv_battery_health",
+        "soh",
+        "battery_soh",
+    )
+
+    for key in soh_candidates:
+        normalized = _normalize_leaf_percent(leaf_data.get(key))
+        if normalized is not None and normalized >= 10:
+            return normalized
+
+    # Fallback when raw SOH is implausibly tiny: derive from Ah.
+    return _derive_leaf_soh_from_ahr(_extract_leaf_ahr(leaf_data), profile_id)
+
+
+def _extract_leaf_hx(leaf_data: dict[str, object]) -> float | None:
+    """Extract and normalize Leaf Hx from known backend aliases."""
+    hx_candidates = (
+        "hx",
+        "h_x",
+        "battery_hx",
+        "hv_battery_hx",
+    )
+    for key in hx_candidates:
+        normalized = _normalize_leaf_percent(leaf_data.get(key))
+        if normalized is not None:
+            return normalized
+    return None
+
+
 def _extract_leaf_odometer(leaf_data: dict[str, object]) -> float | None:
     """Extract odometer from Leaf backend keys and normalize to kilometers."""
     km_candidates = (
@@ -234,6 +328,8 @@ class GenericObdBleApiClient:
 
     def __init__(self, ble_device: BLEDevice) -> None:
         self._ble_device = ble_device
+        self._leaf_odometer_cache: float | None = None
+        self._leaf_odometer_last_attempt: float = 0.0
 
     async def async_get_data(self, options: dict) -> dict[str, object]:
         """Fetch standard and profile-enhanced OBD-II values."""
@@ -361,6 +457,24 @@ class GenericObdBleApiClient:
             response["leaf_backend_status"] = "Leaf backend returned no data"
             return response
 
+        _LOGGER.debug(
+            "Leaf raw metrics: %s",
+            {
+                key: leaf_data.get(key)
+                for key in (
+                    "state_of_charge",
+                    "soc",
+                    "hv_battery_Ah",
+                    "hv_battery_health",
+                    "hx",
+                    "odometer",
+                    "odometer_km",
+                    "odometer_miles",
+                )
+                if key in leaf_data
+            },
+        )
+
         normalized_soc = _extract_leaf_soc(leaf_data, profile.get("id"))
         if normalized_soc is not None:
             original_soc = leaf_data.get("state_of_charge")
@@ -376,14 +490,97 @@ class GenericObdBleApiClient:
             # Avoid exposing implausible raw values as percentages.
             leaf_data.pop("state_of_charge", None)
 
+        normalized_ahr = _extract_leaf_ahr(leaf_data)
+        if normalized_ahr is not None:
+            leaf_data["hv_battery_Ah"] = round(normalized_ahr, 3)
+
+        normalized_soh = _extract_leaf_soh(leaf_data, profile.get("id"))
+        if normalized_soh is not None:
+            leaf_data["hv_battery_health"] = round(normalized_soh, 3)
+
+        normalized_hx = _extract_leaf_hx(leaf_data)
+        if normalized_hx is not None:
+            leaf_data["hv_battery_hx"] = round(normalized_hx, 3)
+            sensor_meta = response.get(DATA_SENSOR_META)
+            if isinstance(sensor_meta, dict) and "hv_battery_hx" not in sensor_meta:
+                sensor_meta["hv_battery_hx"] = {
+                    "name": "HV battery Hx",
+                    "unit": "%",
+                    "state_class": "measurement",
+                    "icon": "mdi:battery-heart-variant",
+                }
+
         response.update(leaf_data)
 
         odometer = _extract_leaf_odometer(leaf_data)
+        if odometer is None or odometer <= 0:
+            fallback_odometer = await self._async_query_leaf_odometer_fallback(options)
+            if fallback_odometer is not None:
+                odometer = fallback_odometer
+
         if odometer is not None and odometer >= 0:
             response["odometer"] = round(odometer, 3)
+            if odometer > 0:
+                self._leaf_odometer_cache = odometer
 
         response["leaf_backend_status"] = "Leaf backend active"
         return response
+
+    async def _async_query_leaf_odometer_fallback(self, options: dict) -> float | None:
+        """Fallback Leaf odometer read using 22 0E01 on header 743."""
+        now = monotonic()
+        # Throttle to reduce BLE churn if this path is failing repeatedly.
+        if now - self._leaf_odometer_last_attempt < 300:
+            return self._leaf_odometer_cache
+
+        self._leaf_odometer_last_attempt = now
+
+        read_uuid = options.get(
+            CONF_CHARACTERISTIC_UUID_READ,
+            DEFAULT_CHARACTERISTIC_UUID_READ,
+        )
+        write_uuid = options.get(
+            CONF_CHARACTERISTIC_UUID_WRITE,
+            DEFAULT_CHARACTERISTIC_UUID_WRITE,
+        )
+
+        client: BleakClient | None = None
+        try:
+            client = await establish_connection(
+                BleakClient,
+                self._ble_device,
+                self._ble_device.address,
+                max_attempts=2,
+            )
+            await self._initialize_adapter(client, read_uuid, write_uuid)
+            await self._send_command(client, read_uuid, write_uuid, "ATSH743")
+            payload = await self._query_pid(
+                client,
+                read_uuid,
+                write_uuid,
+                mode="22",
+                pid="0E01",
+            )
+            await self._send_command(client, read_uuid, write_uuid, "ATSH7DF")
+            if not payload:
+                return self._leaf_odometer_cache
+
+            # Leaf odometer returns 3 data bytes; parse as unsigned int.
+            bytes_for_value = payload[:3]
+            if len(bytes_for_value) < 3:
+                return self._leaf_odometer_cache
+
+            value = float(int.from_bytes(bytes_for_value, byteorder="big", signed=False))
+            if value > 0:
+                self._leaf_odometer_cache = value
+            return self._leaf_odometer_cache
+        except (BleakError, TimeoutError, ValueError) as err:
+            _LOGGER.debug("Leaf odometer fallback query failed: %s", err)
+            return self._leaf_odometer_cache
+        finally:
+            if client:
+                with contextlib.suppress(BleakError):
+                    await client.disconnect()
 
     async def async_probe_profile(self, options: dict) -> dict[str, object]:
         """Probe the selected vehicle profile and summarize supported enhanced PIDs."""
