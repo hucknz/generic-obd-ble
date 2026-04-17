@@ -135,25 +135,46 @@ def _decode_profile_value(payload: list[int], decoder_cfg: dict[str, Any]) -> fl
 
 
 def _normalize_leaf_soc(value: object, profile_id: str | None) -> float | None:
-    """Normalize Leaf SoC values for profiles known to need scaling."""
+    """Normalize Leaf SoC to a percentage in the range 0..100."""
     if not isinstance(value, (int, float)):
         return None
 
     soc = float(value)
-
-    # ZE1 generally reports a direct percentage already.
-    if profile_id != "nissan_leaf_ze0":
-        return soc if 0 <= soc <= 100 else None
-
     if 0 <= soc <= 100:
         return soc
 
-    # ZE0 can report SoC in a 0..409.6 style range.
-    if soc > 100:
-        normalized = soc / 4.096
-        if 0 <= normalized <= 100:
-            return normalized
+    # Different adapters/libraries expose SoC in different scales.
+    divisors: tuple[float, ...]
+    if profile_id == "nissan_leaf_ze0":
+        divisors = (4.096, 21.64, 10.0, 100.0, 102.4, 1000.0)
+    else:
+        divisors = (21.64, 10.0, 100.0, 4.096, 102.4, 1000.0)
 
+    normalized_candidates = [
+        soc / divisor for divisor in divisors if 0 <= (soc / divisor) <= 100
+    ]
+    if not normalized_candidates:
+        return None
+
+    # Prefer the most plausible percentage from available scales.
+    return max(normalized_candidates)
+
+
+def _extract_leaf_soc(leaf_data: dict[str, object], profile_id: str | None) -> float | None:
+    """Extract and normalize Leaf SoC from known backend field aliases."""
+    soc_candidates = (
+        "state_of_charge",
+        "soc",
+        "soc_percent",
+        "soc_pct",
+        "battery_soc",
+        "dash_soc",
+        "dashboard_soc",
+    )
+    for key in soc_candidates:
+        normalized = _normalize_leaf_soc(leaf_data.get(key), profile_id)
+        if normalized is not None:
+            return normalized
     return None
 
 
@@ -167,20 +188,29 @@ def _extract_leaf_odometer(leaf_data: dict[str, object]) -> float | None:
         "odo_km",
         "distance_total_km",
     )
+    km_values: list[float] = []
     for key in km_candidates:
         value = leaf_data.get(key)
-        if isinstance(value, (int, float)):
-            return float(value)
+        if isinstance(value, (int, float)) and value >= 0:
+            km_values.append(float(value))
 
     miles_candidates = (
         "odometer_miles",
         "odo_miles",
         "distance_total_miles",
     )
+    km_from_miles: list[float] = []
     for key in miles_candidates:
         value = leaf_data.get(key)
-        if isinstance(value, (int, float)):
-            return float(value) * 1.609344
+        if isinstance(value, (int, float)) and value >= 0:
+            km_from_miles.append(float(value) * 1.609344)
+
+    non_zero = [value for value in [*km_values, *km_from_miles] if value > 0]
+    if non_zero:
+        return max(non_zero)
+
+    if km_values or km_from_miles:
+        return 0.0
 
     return None
 
@@ -331,10 +361,7 @@ class GenericObdBleApiClient:
             response["leaf_backend_status"] = "Leaf backend returned no data"
             return response
 
-        normalized_soc = _normalize_leaf_soc(
-            leaf_data.get("state_of_charge"),
-            profile.get("id"),
-        )
+        normalized_soc = _extract_leaf_soc(leaf_data, profile.get("id"))
         if normalized_soc is not None:
             original_soc = leaf_data.get("state_of_charge")
             if original_soc != normalized_soc:
@@ -345,6 +372,9 @@ class GenericObdBleApiClient:
                     profile.get("id", "unknown"),
                 )
                 leaf_data["state_of_charge"] = round(normalized_soc, 3)
+        elif isinstance(leaf_data.get("state_of_charge"), (int, float)):
+            # Avoid exposing implausible raw values as percentages.
+            leaf_data.pop("state_of_charge", None)
 
         response.update(leaf_data)
 
