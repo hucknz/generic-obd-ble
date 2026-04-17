@@ -378,6 +378,76 @@ def _parse_value_after_prefix(
     return None
 
 
+def _decode_isotp_payload_from_raw(raw: str, header: str) -> bytes | None:
+    """Decode ISO-TP payload bytes from raw ELM output lines for a given header."""
+    raw_lines = [line.strip().upper() for line in raw.split() if line.strip()]
+    frame_payloads: list[bytes] = []
+
+    for line in raw_lines:
+        compact = "".join(ch for ch in line if ch in "0123456789ABCDEF")
+        if not compact.startswith(header.upper()):
+            continue
+
+        data_hex = compact[len(header) :]
+        if len(data_hex) < 2 or len(data_hex) % 2 != 0:
+            continue
+
+        try:
+            frame_payloads.append(bytes.fromhex(data_hex))
+        except ValueError:
+            continue
+
+    if not frame_payloads:
+        return None
+
+    assembled = bytearray()
+    expected_len: int | None = None
+
+    for frame in frame_payloads:
+        pci = frame[0]
+        frame_type = pci & 0xF0
+
+        # Single frame
+        if frame_type == 0x00:
+            length = pci & 0x0F
+            return bytes(frame[1 : 1 + length])
+
+        # First frame
+        if frame_type == 0x10:
+            expected_len = ((pci & 0x0F) << 8) + frame[1]
+            assembled.extend(frame[2:])
+            continue
+
+        # Consecutive frame
+        if frame_type == 0x20:
+            assembled.extend(frame[1:])
+
+    if expected_len is not None:
+        return bytes(assembled[:expected_len])
+    return bytes(assembled) if assembled else None
+
+
+def _extract_leaf_odo_from_2101_payload(payload: bytes) -> float | None:
+    """Extract odometer from Leaf 21 01 payload variant seen on header 743."""
+    if len(payload) < 12:
+        return None
+    if not payload.startswith(b"\x61\x01"):
+        return None
+
+    candidates: list[int] = []
+
+    # Observed variant places odometer at payload[9:12] as a 24-bit km value.
+    for start in (9, 8, 10):
+        if start + 3 <= len(payload):
+            value = int.from_bytes(payload[start : start + 3], byteorder="big", signed=False)
+            if 1000 <= value <= 1_000_000:
+                candidates.append(value)
+
+    if not candidates:
+        return None
+    return float(min(candidates))
+
+
 PID_DEFINITIONS: tuple[ObdPid, ...] = (
     ObdPid("engine_coolant_temp", "05", _decode_temp),
     ObdPid("engine_rpm", "0C", _decode_rpm),
@@ -695,6 +765,25 @@ class GenericObdBleApiClient:
 
                 raw = await self._send_command(client, read_uuid, write_uuid, command)
                 parsed = _parse_value_after_prefix(raw, prefix, value_bytes=3)
+
+                # Some Leaf variants provide odometer inside the multi-frame 21 01 payload.
+                if parsed is None and label in {"21_01", "21_01_lbc"}:
+                    payload = _decode_isotp_payload_from_raw(raw, header)
+                    payload_candidate = (
+                        _extract_leaf_odo_from_2101_payload(payload)
+                        if payload is not None
+                        else None
+                    )
+                    if payload_candidate is not None:
+                        parsed = payload_candidate
+                    _LOGGER.debug(
+                        "Leaf odometer 21-01 payload decode: header=%s label=%s payload_len=%s parsed=%s",
+                        header,
+                        label,
+                        len(payload) if payload is not None else None,
+                        payload_candidate,
+                    )
+
                 _LOGGER.debug(
                     "Leaf odometer fallback raw response: header=%s cmd=%s label=%s raw=%s parsed=%s",
                     header,
