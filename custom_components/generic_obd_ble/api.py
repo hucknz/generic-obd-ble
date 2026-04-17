@@ -311,11 +311,14 @@ def _extract_leaf_odometer(leaf_data: dict[str, object]) -> float | None:
 
 def _parse_leaf_odometer_response(raw: str) -> float | None:
     """Parse raw ELM327 response for Leaf odometer (22 0E01)."""
-    tokens = [
-        token.upper()
-        for token in raw.replace("\r", " ").replace("\n", " ").split(" ")
-        if len(token) == 2
-    ]
+    filtered = "".join(ch for ch in raw.upper() if ch in "0123456789ABCDEF")
+    if len(filtered) < 6:
+        return None
+
+    # Build 2-hex-digit tokens from fully filtered payload.
+    if len(filtered) % 2 != 0:
+        filtered = filtered[:-1]
+    tokens = [filtered[i : i + 2] for i in range(0, len(filtered), 2)]
 
     # Expected positive response is 62 0E 01 xx xx xx
     for i in range(len(tokens) - 5):
@@ -328,7 +331,8 @@ def _parse_leaf_odometer_response(raw: str) -> float | None:
                 return None
             return float((b1 << 16) | (b2 << 8) | b3)
 
-    # Some adapters collapse the prefix; try matching 0E 01 xx xx xx.
+    # Header + PCI form can include: 76 30 66 20 E0 1x xx xx ... depending on formatting.
+    # Retry on a compact stream by searching for 0E 01 and taking next 3 bytes.
     for i in range(len(tokens) - 4):
         if tokens[i : i + 2] == ["0E", "01"]:
             try:
@@ -611,14 +615,22 @@ class GenericObdBleApiClient:
                 self._ble_device.address,
                 max_attempts=2,
             )
-            await self._initialize_adapter(client, read_uuid, write_uuid)
-            # Leaf backend uses ISO-15765 CAN 11-bit 500k (protocol 6).
+            # Match py_nissan_leaf_obd_ble startup for framed CAN commands.
+            await self._send_command(client, read_uuid, write_uuid, "ATE0")
             await self._send_command(client, read_uuid, write_uuid, "ATSP6")
+            await self._send_command(client, read_uuid, write_uuid, "ATH1")
+            await self._send_command(client, read_uuid, write_uuid, "ATL0")
+            await self._send_command(client, read_uuid, write_uuid, "ATS0")
+            await self._send_command(client, read_uuid, write_uuid, "ATCAF0")
 
             for header in ("743", "79B", "797"):
                 for pid in ("0E01", "F186"):
-                    await self._send_command(client, read_uuid, write_uuid, f"ATSH{header}")
-                    raw = await self._send_command(client, read_uuid, write_uuid, f"22{pid}")
+                    await self._send_command(client, read_uuid, write_uuid, f"AT SH {header}")
+                    await self._send_command(client, read_uuid, write_uuid, f"AT FC SH {header}")
+                    await self._send_command(client, read_uuid, write_uuid, "AT FC SD 30 00 00")
+                    await self._send_command(client, read_uuid, write_uuid, "AT FC SM 1")
+
+                    raw = await self._send_command(client, read_uuid, write_uuid, f"03 22 {pid[:2]} {pid[2:]}")
                     parsed = _parse_leaf_odometer_response(raw)
                     _LOGGER.debug(
                         "Leaf odometer fallback raw response: header=%s pid=%s raw=%s parsed=%s",
@@ -629,10 +641,8 @@ class GenericObdBleApiClient:
                     )
                     if parsed is not None and parsed > 0:
                         self._leaf_odometer_cache = parsed
-                        await self._send_command(client, read_uuid, write_uuid, "ATSH7DF")
                         return self._leaf_odometer_cache
 
-            await self._send_command(client, read_uuid, write_uuid, "ATSH7DF")
             return self._leaf_odometer_cache
         except (BleakError, TimeoutError, ValueError) as err:
             _LOGGER.debug("Leaf odometer fallback query failed: %s", err)
