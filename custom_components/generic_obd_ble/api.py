@@ -346,6 +346,38 @@ def _parse_leaf_odometer_response(raw: str) -> float | None:
     return None
 
 
+def _parse_value_after_prefix(
+    raw: str,
+    prefix: tuple[str, ...],
+    *,
+    value_bytes: int = 3,
+) -> float | None:
+    """Parse an unsigned integer value after a response prefix."""
+    filtered = "".join(ch for ch in raw.upper() if ch in "0123456789ABCDEF")
+    if len(filtered) < (len(prefix) + value_bytes) * 2:
+        return None
+
+    if len(filtered) % 2 != 0:
+        filtered = filtered[:-1]
+    tokens = [filtered[i : i + 2] for i in range(0, len(filtered), 2)]
+
+    for i in range(len(tokens) - (len(prefix) + value_bytes) + 1):
+        if tuple(tokens[i : i + len(prefix)]) != prefix:
+            continue
+
+        try:
+            bytes_vals = [int(t, 16) for t in tokens[i + len(prefix) : i + len(prefix) + value_bytes]]
+        except ValueError:
+            return None
+
+        value = 0
+        for byte in bytes_vals:
+            value = (value << 8) | byte
+        return float(value)
+
+    return None
+
+
 PID_DEFINITIONS: tuple[ObdPid, ...] = (
     ObdPid("engine_coolant_temp", "05", _decode_temp),
     ObdPid("engine_rpm", "0C", _decode_rpm),
@@ -623,25 +655,58 @@ class GenericObdBleApiClient:
             await self._send_command(client, read_uuid, write_uuid, "ATS0")
             await self._send_command(client, read_uuid, write_uuid, "ATCAF0")
 
-            for header in ("743", "79B", "797"):
-                for pid in ("0E01", "F186"):
-                    await self._send_command(client, read_uuid, write_uuid, f"AT SH {header}")
-                    await self._send_command(client, read_uuid, write_uuid, f"AT FC SH {header}")
-                    await self._send_command(client, read_uuid, write_uuid, "AT FC SD 30 00 00")
-                    await self._send_command(client, read_uuid, write_uuid, "AT FC SM 1")
+            request_candidates = (
+                {
+                    "header": "743",
+                    "command": "03 22 0E 01",
+                    "prefix": ("62", "0E", "01"),
+                    "label": "22_0E01",
+                },
+                {
+                    "header": "743",
+                    "command": "03 22 F1 86",
+                    "prefix": ("62", "F1", "86"),
+                    "label": "22_F186",
+                },
+                {
+                    "header": "743",
+                    "command": "02 21 01",
+                    "prefix": ("61", "01"),
+                    "label": "21_01",
+                },
+                {
+                    "header": "79B",
+                    "command": "02 21 01",
+                    "prefix": ("61", "01"),
+                    "label": "21_01_lbc",
+                },
+            )
 
-                    raw = await self._send_command(client, read_uuid, write_uuid, f"03 22 {pid[:2]} {pid[2:]}")
-                    parsed = _parse_leaf_odometer_response(raw)
-                    _LOGGER.debug(
-                        "Leaf odometer fallback raw response: header=%s pid=%s raw=%s parsed=%s",
-                        header,
-                        pid,
-                        raw,
-                        parsed,
-                    )
-                    if parsed is not None and parsed > 0:
-                        self._leaf_odometer_cache = parsed
-                        return self._leaf_odometer_cache
+            for candidate in request_candidates:
+                header = str(candidate["header"])
+                command = str(candidate["command"])
+                prefix = tuple(str(part) for part in candidate["prefix"])
+                label = str(candidate["label"])
+
+                await self._send_command(client, read_uuid, write_uuid, f"AT SH {header}")
+                await self._send_command(client, read_uuid, write_uuid, f"AT FC SH {header}")
+                await self._send_command(client, read_uuid, write_uuid, "AT FC SD 30 00 00")
+                await self._send_command(client, read_uuid, write_uuid, "AT FC SM 1")
+
+                raw = await self._send_command(client, read_uuid, write_uuid, command)
+                parsed = _parse_value_after_prefix(raw, prefix, value_bytes=3)
+                _LOGGER.debug(
+                    "Leaf odometer fallback raw response: header=%s cmd=%s label=%s raw=%s parsed=%s",
+                    header,
+                    command,
+                    label,
+                    raw,
+                    parsed,
+                )
+
+                if parsed is not None and 1000 <= parsed <= 1000000:
+                    self._leaf_odometer_cache = parsed
+                    return self._leaf_odometer_cache
 
             return self._leaf_odometer_cache
         except (BleakError, TimeoutError, ValueError) as err:
