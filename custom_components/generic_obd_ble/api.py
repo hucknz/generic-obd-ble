@@ -543,6 +543,16 @@ class GenericObdBleApiClient:
                     "icon": "mdi:battery-heart-variant",
                 }
 
+        _LOGGER.debug(
+            "Leaf normalized metrics: %s",
+            {
+                "state_of_charge": leaf_data.get("state_of_charge"),
+                "hv_battery_Ah": leaf_data.get("hv_battery_Ah"),
+                "hv_battery_health": leaf_data.get("hv_battery_health"),
+                "hv_battery_hx": leaf_data.get("hv_battery_hx"),
+            },
+        )
+
         response.update(leaf_data)
 
         odometer = _extract_leaf_odometer(leaf_data)
@@ -574,8 +584,12 @@ class GenericObdBleApiClient:
     async def _async_query_leaf_odometer_fallback(self, options: dict) -> float | None:
         """Fallback Leaf odometer read using 22 0E01 on header 743."""
         now = monotonic()
-        # Throttle to reduce BLE churn if this path is failing repeatedly.
-        if now - self._leaf_odometer_last_attempt < 300:
+        # Throttle only after we have a cached value; otherwise keep trying.
+        if (
+            self._leaf_odometer_cache is not None
+            and now - self._leaf_odometer_last_attempt < 300
+        ):
+            _LOGGER.debug("Leaf odometer fallback throttled; using cache=%s", self._leaf_odometer_cache)
             return self._leaf_odometer_cache
 
         self._leaf_odometer_last_attempt = now
@@ -598,19 +612,27 @@ class GenericObdBleApiClient:
                 max_attempts=2,
             )
             await self._initialize_adapter(client, read_uuid, write_uuid)
-            await self._send_command(client, read_uuid, write_uuid, "ATSH743")
-            raw = await self._send_command(client, read_uuid, write_uuid, "220E01")
+            # Leaf backend uses ISO-15765 CAN 11-bit 500k (protocol 6).
+            await self._send_command(client, read_uuid, write_uuid, "ATSP6")
+
+            for header in ("743", "79B", "797"):
+                for pid in ("0E01", "F186"):
+                    await self._send_command(client, read_uuid, write_uuid, f"ATSH{header}")
+                    raw = await self._send_command(client, read_uuid, write_uuid, f"22{pid}")
+                    parsed = _parse_leaf_odometer_response(raw)
+                    _LOGGER.debug(
+                        "Leaf odometer fallback raw response: header=%s pid=%s raw=%s parsed=%s",
+                        header,
+                        pid,
+                        raw,
+                        parsed,
+                    )
+                    if parsed is not None and parsed > 0:
+                        self._leaf_odometer_cache = parsed
+                        await self._send_command(client, read_uuid, write_uuid, "ATSH7DF")
+                        return self._leaf_odometer_cache
+
             await self._send_command(client, read_uuid, write_uuid, "ATSH7DF")
-
-            parsed = _parse_leaf_odometer_response(raw)
-            _LOGGER.debug("Leaf odometer fallback raw response: %s parsed=%s", raw, parsed)
-
-            if parsed is None:
-                return self._leaf_odometer_cache
-
-            value = parsed
-            if value > 0:
-                self._leaf_odometer_cache = value
             return self._leaf_odometer_cache
         except (BleakError, TimeoutError, ValueError) as err:
             _LOGGER.debug("Leaf odometer fallback query failed: %s", err)
