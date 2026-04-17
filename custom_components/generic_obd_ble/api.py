@@ -309,6 +309,39 @@ def _extract_leaf_odometer(leaf_data: dict[str, object]) -> float | None:
     return None
 
 
+def _parse_leaf_odometer_response(raw: str) -> float | None:
+    """Parse raw ELM327 response for Leaf odometer (22 0E01)."""
+    tokens = [
+        token.upper()
+        for token in raw.replace("\r", " ").replace("\n", " ").split(" ")
+        if len(token) == 2
+    ]
+
+    # Expected positive response is 62 0E 01 xx xx xx
+    for i in range(len(tokens) - 5):
+        if tokens[i : i + 3] == ["62", "0E", "01"]:
+            try:
+                b1 = int(tokens[i + 3], 16)
+                b2 = int(tokens[i + 4], 16)
+                b3 = int(tokens[i + 5], 16)
+            except ValueError:
+                return None
+            return float((b1 << 16) | (b2 << 8) | b3)
+
+    # Some adapters collapse the prefix; try matching 0E 01 xx xx xx.
+    for i in range(len(tokens) - 4):
+        if tokens[i : i + 2] == ["0E", "01"]:
+            try:
+                b1 = int(tokens[i + 2], 16)
+                b2 = int(tokens[i + 3], 16)
+                b3 = int(tokens[i + 4], 16)
+            except ValueError:
+                return None
+            return float((b1 << 16) | (b2 << 8) | b3)
+
+    return None
+
+
 PID_DEFINITIONS: tuple[ObdPid, ...] = (
     ObdPid("engine_coolant_temp", "05", _decode_temp),
     ObdPid("engine_rpm", "0C", _decode_rpm),
@@ -513,15 +546,27 @@ class GenericObdBleApiClient:
         response.update(leaf_data)
 
         odometer = _extract_leaf_odometer(leaf_data)
+        odometer_source = "leaf_backend"
         if odometer is None or odometer <= 0:
             fallback_odometer = await self._async_query_leaf_odometer_fallback(options)
             if fallback_odometer is not None:
                 odometer = fallback_odometer
+                odometer_source = "fallback_query"
 
-        if odometer is not None and odometer >= 0:
+        if odometer is not None and odometer > 0:
             response["odometer"] = round(odometer, 3)
-            if odometer > 0:
-                self._leaf_odometer_cache = odometer
+            self._leaf_odometer_cache = odometer
+        elif self._leaf_odometer_cache is not None and self._leaf_odometer_cache > 0:
+            # Reuse last known good odometer instead of exposing transient zero.
+            response["odometer"] = round(self._leaf_odometer_cache, 3)
+            odometer_source = "cached"
+
+        _LOGGER.debug(
+            "Leaf odometer resolved: value=%s source=%s raw_backend=%s",
+            response.get("odometer"),
+            odometer_source,
+            leaf_data.get("odometer"),
+        )
 
         response["leaf_backend_status"] = "Leaf backend active"
         return response
@@ -554,23 +599,16 @@ class GenericObdBleApiClient:
             )
             await self._initialize_adapter(client, read_uuid, write_uuid)
             await self._send_command(client, read_uuid, write_uuid, "ATSH743")
-            payload = await self._query_pid(
-                client,
-                read_uuid,
-                write_uuid,
-                mode="22",
-                pid="0E01",
-            )
+            raw = await self._send_command(client, read_uuid, write_uuid, "220E01")
             await self._send_command(client, read_uuid, write_uuid, "ATSH7DF")
-            if not payload:
+
+            parsed = _parse_leaf_odometer_response(raw)
+            _LOGGER.debug("Leaf odometer fallback raw response: %s parsed=%s", raw, parsed)
+
+            if parsed is None:
                 return self._leaf_odometer_cache
 
-            # Leaf odometer returns 3 data bytes; parse as unsigned int.
-            bytes_for_value = payload[:3]
-            if len(bytes_for_value) < 3:
-                return self._leaf_odometer_cache
-
-            value = float(int.from_bytes(bytes_for_value, byteorder="big", signed=False))
+            value = parsed
             if value > 0:
                 self._leaf_odometer_cache = value
             return self._leaf_odometer_cache
